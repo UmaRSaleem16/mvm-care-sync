@@ -1,0 +1,111 @@
+x-backend-env: &backend-env
+  DJANGO_SETTINGS_MODULE: caresync.settings.development
+  SECRET_KEY: ${SECRET_KEY:-change-me-in-production-minimum-50-characters-long}
+  DEBUG: "True"
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
+  DATABASE_URL: postgres://${POSTGRES_USER:-caresync}:${POSTGRES_PASSWORD:-caresync_dev}@db:5432/${POSTGRES_DB:-caresync}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost,http://localhost:3000}
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  EMAIL_BACKEND: apps.common.email_backend.ResendEmailBackend
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-noreply@junaid.tariq.com}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  TEAMS_WEBHOOK_URL: ${TEAMS_WEBHOOK_URL:-}
+  FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+  JWT_ACCESS_TOKEN_LIFETIME_HOURS: ${JWT_ACCESS_TOKEN_LIFETIME_HOURS:-8}
+  JWT_REFRESH_TOKEN_LIFETIME_DAYS: ${JWT_REFRESH_TOKEN_LIFETIME_DAYS:-7}
+  COLLECT_STATIC: "0"
+
+services:
+
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-caresync}
+      POSTGRES_USER: ${POSTGRES_USER:-caresync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-caresync_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-caresync}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./caresync-backend
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./caresync-backend:/app
+    environment:
+      <<: *backend-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./caresync-frontend
+      dockerfile: Dockerfile
+      target: dev
+    command: npm run dev -- --host 0.0.0.0
+    volumes:
+      - ./caresync-frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:5173"
+    environment:
+      API_PROXY: http://backend:8000
+    depends_on:
+      - backend
+
+  worker:
+    build:
+      context: ./caresync-backend
+      dockerfile: Dockerfile
+    command: celery -A caresync worker --loglevel=info --concurrency=2
+    volumes:
+      - ./caresync-backend:/app
+    environment:
+      <<: *backend-env
+
+  beat:
+    build:
+      context: ./caresync-backend
+      dockerfile: Dockerfile
+    command: celery -A caresync beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - ./caresync-backend:/app
+    environment:
+      <<: *backend-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
